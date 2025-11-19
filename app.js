@@ -1,11 +1,11 @@
-// app.js
+// app.js (FULL - server-side WebAuthn integrated)
 // ----------------------------
 // Utilities
 // ----------------------------
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 function el(html){ const div=document.createElement('div'); div.innerHTML=html; return div.firstElementChild; }
-function show(node, text, type='info'){ const n = $('#notif'); n.textContent = text; n.className = `notification show ${type}`; setTimeout(()=>n.className='notification',3500); }
+function show(node, text, type='info'){ const n = $('#notif'); if(!n) return; n.textContent = text; n.className = `notification show ${type}`; setTimeout(()=>n.className='notification',3500); }
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // ----------------------------
@@ -62,15 +62,15 @@ navLinks.forEach(a => {
     $('#' + page).classList.add('active');
   });
 });
-navToggle.addEventListener('click', ()=> navLinksWrap.classList.toggle('active'));
+if (navToggle && navLinksWrap) navToggle.addEventListener('click', ()=> navLinksWrap.classList.toggle('active'));
 
 // ----------------------------
 // Auth modal logic
 // ----------------------------
-$('#btnSignIn').addEventListener('click',()=> authModal.setAttribute('aria-hidden','false'));
-$('#closeAuth').addEventListener('click',()=> authModal.setAttribute('aria-hidden','true'));
+if ($('#btnSignIn')) $('#btnSignIn').addEventListener('click',()=> authModal.setAttribute('aria-hidden','false'));
+if ($('#closeAuth')) $('#closeAuth').addEventListener('click',()=> authModal.setAttribute('aria-hidden','true'));
 
-btnRegister.addEventListener('click', async ()=>{
+if (btnRegister) btnRegister.addEventListener('click', async ()=>{
   const email = authEmail.value.trim(), pw = authPassword.value;
   if(!email || !pw) { authMsg.textContent='Enter email & password'; return; }
   authMsg.textContent='Registering...';
@@ -81,19 +81,18 @@ btnRegister.addEventListener('click', async ()=>{
   } catch(e){ authMsg.textContent = e.message; }
 });
 
-btnLogin.addEventListener('click', async ()=>{
+if (btnLogin) btnLogin.addEventListener('click', async ()=>{
   const email = authEmail.value.trim(), pw = authPassword.value;
   if(!email || !pw) { authMsg.textContent='Enter email & password'; return; }
   authMsg.textContent='Signing in...';
   try {
     await auth.signInWithEmailAndPassword(email,pw);
-    // derive passphrase key if user entered passphrase earlier could be asked separately
     authModal.setAttribute('aria-hidden','true');
     authMsg.textContent='';
   } catch(e){ authMsg.textContent = e.message; }
 });
 
-googleLogin.addEventListener('click', async ()=>{
+if (googleLogin) googleLogin.addEventListener('click', async ()=>{
   const provider = new firebase.auth.GoogleAuthProvider();
   try{
     await auth.signInWithPopup(provider);
@@ -102,7 +101,7 @@ googleLogin.addEventListener('click', async ()=>{
 });
 
 // sign out
-btnSignOut.addEventListener('click', ()=> auth.signOut());
+if (btnSignOut) btnSignOut.addEventListener('click', ()=> auth.signOut());
 
 // ----------------------------
 // Crypto helpers (WebCrypto)
@@ -225,31 +224,108 @@ window.deleteFingerprint = async function(docId){
 };
 
 // ----------------------------
-// Enrollment (WebAuthn) -> create credential, encrypt metadata (credential id string) and upload
+// Helper: ArrayBuffer <-> Base64 (for WebAuthn transport)
 // ----------------------------
-enrollBtn.addEventListener('click', async ()=>{
+function abToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+function base64ToAb(b64) {
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Extract client response parts for assertion/attestation
+function parseAttestationResponse(credential) {
+  return {
+    id: credential.id,
+    rawId: abToBase64(credential.rawId),
+    response: {
+      clientDataJSON: abToBase64(credential.response.clientDataJSON),
+      attestationObject: abToBase64(credential.response.attestationObject)
+    },
+    type: credential.type
+  };
+}
+function parseAssertionResponse(assertion) {
+  return {
+    id: assertion.id,
+    rawId: abToBase64(assertion.rawId),
+    response: {
+      clientDataJSON: abToBase64(assertion.response.clientDataJSON),
+      authenticatorData: abToBase64(assertion.response.authenticatorData),
+      signature: abToBase64(assertion.response.signature),
+      userHandle: assertion.response.userHandle ? abToBase64(assertion.response.userHandle) : null
+    },
+    type: assertion.type
+  };
+}
+
+// ----------------------------
+// Enrollment (WebAuthn) - server assisted
+// flow:
+// 1) call functions().httpsCallable('beginRegistration') -> returns options (challenge base64, user info, rp, etc)
+// 2) adapt options challenge -> ArrayBuffer, call navigator.credentials.create({ publicKey })
+// 3) send attestation result to functions().httpsCallable('finishRegistration') for verification & storage
+// 4) on server success, store encrypted metadata (credential id label) into Firestore as before
+// ----------------------------
+async function beginRegistrationServer() {
+  const fn = firebase.functions().httpsCallable('beginRegistration');
+  const resp = await fn({}); // server should return options including challenge (base64) and user info
+  return resp.data;
+}
+
+async function finishRegistrationServer(attestationResponse) {
+  const fn = firebase.functions().httpsCallable('finishRegistration');
+  const resp = await fn(attestationResponse);
+  return resp.data;
+}
+
+if (enrollBtn) enrollBtn.addEventListener('click', async ()=>{
   if(!auth.currentUser){ show('','Sign in first','info'); return; }
   if(!sessionKey){ show('','Enter passphrase and press Set','info'); return; }
   const label = (fpLabel.value || `FP ${new Date().toLocaleString()}`).trim();
 
   try {
-    const publicKey = {
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rp: { name: 'Smart Door Lock' },
-      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: auth.currentUser.email, displayName: label },
-      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-      timeout: 60000,
-      authenticatorSelection: { userVerification: 'preferred' }
-    };
+    // 1. begin registration (get options from server)
+    const options = await beginRegistrationServer(); // server returns publicKey options but with challenge & user.id as base64 strings
+    // transform options: challenge and user.id and any credentialExclude ids -> ArrayBuffers
+    const publicKey = JSON.parse(JSON.stringify(options.publicKey)); // clone
+
+    publicKey.challenge = base64ToAb(options.publicKey.challenge);
+    if (options.publicKey.user && options.publicKey.user.id) {
+      publicKey.user.id = base64ToAb(options.publicKey.user.id);
+    }
+    if (options.publicKey.excludeCredentials && options.publicKey.excludeCredentials.length) {
+      publicKey.excludeCredentials = options.publicKey.excludeCredentials.map(c => ({
+        type: c.type,
+        id: base64ToAb(c.id)
+      }));
+    }
+
+    // 2. create credential
     const cred = await navigator.credentials.create({ publicKey });
     if(!cred) throw new Error('Credential creation failed');
 
-    // Save only metadata (credential.id) encrypted
-    const metadata = { credentialId: arrayBufferToBase64(cred.rawId || cred.id), label, createdAt: new Date().toISOString() };
-    const enc = await encryptObject(metadata);
+    // 3. prepare attestation object to send to server
+    const attestation = parseAttestationResponse(cred);
+    // include label for metadata
+    attestation.label = label;
 
-    const id = fingerprintsColRef(currentUID).doc().id;
-    await fingerprintsColRef(currentUID).doc(id).set({ iv: enc.iv, ct: enc.ct, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    // 4. finish registration on server (server will verify attestation and store public key & credential id)
+    const finishResp = await finishRegistrationServer(attestation);
+    if(!finishResp || !finishResp.success) throw new Error(finishResp && finishResp.error ? finishResp.error : 'Server registration failed');
+
+    // 5. locally store encrypted metadata in Firestore (credential id encrypted)
+    const metadata = { credentialId: attestation.rawId, label, createdAt: new Date().toISOString() };
+    const enc = await encryptObject(metadata);
+    const docId = fingerprintsColRef(currentUID).doc().id;
+    await fingerprintsColRef(currentUID).doc(docId).set({ iv: enc.iv, ct: enc.ct, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
 
     show('','Enrolled '+label,'info');
     fpLabel.value='';
@@ -260,50 +336,84 @@ enrollBtn.addEventListener('click', async ()=>{
   }
 });
 
-// small helper: arrayBuffer -> base64
-function arrayBufferToBase64(buf){
-  const bytes = new Uint8Array(buf);
-  let binary='';
-  for(let b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
-}
-function base64ToArrayBuffer(b64){
-  const binary = atob(b64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for(let i=0;i<len;i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
+// ----------------------------
+// LOGIN (WebAuthn) - server assisted
+// flow:
+// 1) call functions().httpsCallable('beginLogin', { userId }) -> returns challenge base64 and credentialIds list (base64)
+// 2) build allowCredentials using those ids, challenge -> ArrayBuffer
+// 3) call navigator.credentials.get({ publicKey, mediation: 'conditional' })
+// 4) send assertion (parse) to finishLogin server callable for verification
+// ----------------------------
+async function beginLoginServer() {
+  const fn = firebase.functions().httpsCallable('beginLogin');
+  const resp = await fn({}); // server should identify the user from session or be passed user id
+  return resp.data;
 }
 
-// ----------------------------
-// Authentication (WebAuthn get) -> unlocking
-// ----------------------------
-unlockBtn.addEventListener('click', async ()=>{
+async function finishLoginServer(assertionResponse) {
+  const fn = firebase.functions().httpsCallable('finishLogin');
+  const resp = await fn(assertionResponse);
+  return resp.data;
+}
+
+if (unlockBtn) unlockBtn.addEventListener('click', async ()=>{
   if(!auth.currentUser){ show('','Please sign in','info'); return; }
   show('','Touch your authenticator...','info');
 
   try {
-    // Note: production should supply allowCredentials — here we rely on platform authenticator acceptance.
-    const publicKey = {
-      challenge: crypto.getRandomValues(new Uint8Array(32)),
-      timeout: 60000,
-      userVerification: 'preferred'
-    };
-    const assertion = await navigator.credentials.get({ publicKey });
-    if(assertion){
+    // 1. request challenge + credential ids from server
+    const options = await beginLoginServer(); // expected: { publicKey: { challenge: base64, credentialIds: [base64,...], userVerification } }
+    if(!options || !options.publicKey) throw new Error('Invalid server response');
+
+    // Convert challenge
+    const publicKey = {};
+    publicKey.challenge = base64ToAb(options.publicKey.challenge);
+    publicKey.userVerification = options.publicKey.userVerification || 'preferred';
+
+    // Build allowCredentials from server-provided credentialIds
+    if (Array.isArray(options.publicKey.credentialIds) && options.publicKey.credentialIds.length) {
+      publicKey.allowCredentials = options.publicKey.credentialIds.map(id => ({
+        type: 'public-key',
+        id: base64ToAb(id),
+        // transports: ['internal','usb','nfc','ble'] // optional
+      }));
+    } else {
+      // If no credentialIds are provided, still try an empty allowCredentials (some browsers may still show platform authenticators)
+      publicKey.allowCredentials = [];
+    }
+
+    // rpId - server should be authoritative, but set to current host to be safe
+    publicKey.rpId = options.publicKey.rpId || window.location.hostname;
+
+    // 2. call navigator.credentials.get with mediation: 'conditional' to encourage mobile passkey UI
+    const assertion = await navigator.credentials.get({ publicKey, mediation: 'conditional' });
+
+    if(!assertion) throw new Error('No assertion returned');
+
+    // 3. parse assertion and send to server
+    const parsed = parseAssertionResponse(assertion);
+    // Optionally include extra info
+    parsed.userId = currentUID;
+
+    const finishResp = await finishLoginServer(parsed);
+
+    if (finishResp && finishResp.success) {
       updateLockUI('UNLOCKED');
       logAccess('UNLOCK','FINGERPRINT','SUCCESS');
-      show('','Unlocked','info');
-      // Optionally send to Bluetooth: await bt.send('UNLOCK');
+      show('','Unlocked','success');
+      // Optionally send to Bluetooth
+      // await bt.send('UNLOCK');
     } else {
       updateLockUI('LOCKED');
       logAccess('UNLOCK','FINGERPRINT','FAILED');
-      show('','Auth failed','info');
+      show('','Passkey verification failed','error');
     }
+
   } catch(e){
     console.error(e);
-    show('','Auth error: '+(e.message||e),'info');
+    updateLockUI('LOCKED');
     logAccess('UNLOCK','FINGERPRINT','FAILED');
+    show('','Auth error: '+(e.message||e),'error');
   }
 });
 
@@ -311,7 +421,7 @@ unlockBtn.addEventListener('click', async ()=>{
 // Encryption passphrase flow
 // - user enters passphrase, we fetch or create salt for user and derive sessionKey
 // ----------------------------
-setPassBtn.addEventListener('click', async ()=>{
+if (setPassBtn) setPassBtn.addEventListener('click', async ()=>{
   const pass = passphraseInput.value;
   if(!pass){ passStatus.textContent='Enter passphrase'; return; }
   if(!auth.currentUser){ passStatus.textContent='Sign in first'; return; }
@@ -326,7 +436,7 @@ setPassBtn.addEventListener('click', async ()=>{
   } catch(e){ passStatus.textContent = 'Derive key failed: '+(e.message||e) }
 });
 
-clearPassBtn.addEventListener('click', ()=>{
+if (clearPassBtn) clearPassBtn.addEventListener('click', ()=>{
   sessionKey = null; passphraseInput.value=''; passStatus.textContent='Cleared';
 });
 
@@ -352,7 +462,7 @@ function metaDocRef(uid){ return db.collection('users').doc(uid).collection('met
 // ----------------------------
 // Sync button: manual fetch/render
 // ----------------------------
-syncBtn.addEventListener('click', async ()=>{
+if (syncBtn) syncBtn.addEventListener('click', async ()=>{
   if(!currentUID){ show('','Sign in first','info'); return; }
   if(!sessionKey){ show('','Derive key first','info'); return; }
   const snap = await fingerprintsColRef(currentUID).get();
@@ -379,7 +489,7 @@ class BluetoothManager {
         acceptAllDevices: true,
         optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
       });
-      show('','Device selected: '+this.device.name,'info');
+      show('','Device selected: '+(this.device && this.device.name ? this.device.name : 'Unnamed'),'info');
       return this.device;
     } catch(e){ throw e; }
   }
@@ -400,7 +510,7 @@ class BluetoothManager {
 
 const bt = new BluetoothManager();
 
-connectBtBtn.addEventListener('click', async ()=>{
+if (connectBtBtn) connectBtBtn.addEventListener('click', async ()=>{
   try{
     await bt.requestDevice();
     await bt.connect();
@@ -443,7 +553,7 @@ function renderLogs(){
   if(!logs.length) return logsList.innerHTML = `<div class="muted">No logs</div>`;
   logsList.innerHTML = logs.map(l=>`<div class="log-item"><div><strong>${l.timestamp}</strong><div class="muted">${l.method}</div></div><div>${l.action}</div><div>${l.status}</div></div>`).join('');
 }
-clearLogsBtn.addEventListener('click', ()=> { if(confirm('Clear logs?')){ localStorage.removeItem('accessLogs'); renderLogs(); } });
+if (clearLogsBtn) clearLogsBtn.addEventListener('click', ()=> { if(confirm('Clear logs?')){ localStorage.removeItem('accessLogs'); renderLogs(); } });
 
 // ----------------------------
 // Auth state changes
@@ -452,7 +562,7 @@ auth.onAuthStateChanged(async user=>{
   if(user){
     currentUID = user.uid;
     userEmailSpan.textContent = user.email || user.displayName || '';
-    btnSignIn.style.display='none'; btnSignOut.style.display='inline-block';
+    if (btnSignIn) btnSignIn.style.display='none'; if (btnSignOut) btnSignOut.style.display='inline-block';
     // ensure salt exists (create if not)
     await ensureUserSalt(currentUID);
     // subscribe to fingerprint updates (will render but decryption requires sessionKey)
@@ -462,7 +572,7 @@ auth.onAuthStateChanged(async user=>{
   } else {
     currentUID = null;
     userEmailSpan.textContent = '';
-    btnSignIn.style.display='inline-block'; btnSignOut.style.display='none';
+    if (btnSignIn) btnSignIn.style.display='inline-block'; if (btnSignOut) btnSignOut.style.display='none';
     usersList.innerHTML = `<div class="muted">Please sign in</div>`;
     devicesList.innerHTML = `<div class="muted">Please sign in</div>`;
     logsList.innerHTML = `<div class="muted">Please sign in</div>`;
@@ -483,6 +593,30 @@ function updateLockUI(state){
 function bufToHex(buf){
   const bytes = new Uint8Array(buf);
   return Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+// ----------------------------
+// Server call wrappers (Firebase Functions callable)
+// ----------------------------
+async function beginRegistrationServer() {
+  const fn = firebase.functions().httpsCallable('beginRegistration');
+  const resp = await fn({});
+  return resp.data;
+}
+async function finishRegistrationServer(attestationResponse) {
+  const fn = firebase.functions().httpsCallable('finishRegistration');
+  const resp = await fn(attestationResponse);
+  return resp.data;
+}
+async function beginLoginServer() {
+  const fn = firebase.functions().httpsCallable('beginLogin');
+  const resp = await fn({});
+  return resp.data;
+}
+async function finishLoginServer(assertionResponse) {
+  const fn = firebase.functions().httpsCallable('finishLogin');
+  const resp = await fn(assertionResponse);
+  return resp.data;
 }
 
 // ----------------------------
