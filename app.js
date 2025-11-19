@@ -1,6 +1,5 @@
-// app.js - client side, server-side WebAuthn flow integrated
+// app.js (client) — communicates with /api endpoints on the same host
 
-/* ------------- Helpers & DOM refs ------------- */
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -41,7 +40,6 @@ const devicesList = $('#devicesList');
 const logsList = $('#logsList');
 const clearLogsBtn = $('#clearLogsBtn');
 
-/* ------------- Navigation ------------- */
 navLinks.forEach(a => {
   a.addEventListener('click', (e) => {
     e.preventDefault();
@@ -54,7 +52,6 @@ navLinks.forEach(a => {
 });
 if (navToggle && navLinksWrap) navToggle.addEventListener('click', ()=> navLinksWrap.classList.toggle('active'));
 
-/* ------------- Auth modal ------------- */
 if (btnSignIn) btnSignIn.addEventListener('click',()=> authModal.setAttribute('aria-hidden','false'));
 if (closeAuth) closeAuth.addEventListener('click',()=> authModal.setAttribute('aria-hidden','true'));
 
@@ -90,21 +87,9 @@ if (googleLogin) googleLogin.addEventListener('click', async ()=>{
 
 if (btnSignOut) btnSignOut.addEventListener('click', ()=> auth.signOut());
 
-/* ------------- Crypto helpers ------------- */
 let sessionKey = null;
 let currentUID = null;
 let userSalt = null;
-
-async function deriveKeyFromPassphrase(passphrase, saltHex) {
-  const enc = new TextEncoder();
-  const passBytes = enc.encode(passphrase);
-  const salt = hexToBuf(saltHex);
-  const baseKey = await crypto.subtle.importKey('raw', passBytes, 'PBKDF2', false, ['deriveKey']);
-  const key = await crypto.subtle.deriveKey({
-    name:'PBKDF2', salt, iterations: 200000, hash:'SHA-256'
-  }, baseKey, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
-  return key;
-}
 
 function bufToHex(buf){
   const bytes = new Uint8Array(buf);
@@ -129,7 +114,16 @@ function base64ToBuf(b64){
   for(let i=0;i<len;i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
-
+async function deriveKeyFromPassphrase(passphrase, saltHex) {
+  const enc = new TextEncoder();
+  const passBytes = enc.encode(passphrase);
+  const salt = hexToBuf(saltHex);
+  const baseKey = await crypto.subtle.importKey('raw', passBytes, 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({
+    name:'PBKDF2', salt, iterations: 200000, hash:'SHA-256'
+  }, baseKey, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']);
+  return key;
+}
 async function encryptObject(obj){
   if(!sessionKey) throw new Error('No session key');
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -143,24 +137,23 @@ async function decryptObject({ iv, ct }){
   return JSON.parse(new TextDecoder().decode(plaintext));
 }
 
-/* ------------- Firestore helpers ------------- */
 function metaDocRef(uid){ return db.collection('users').doc(uid).collection('meta').doc('meta'); }
 function fingerprintsColRef(uid){ return db.collection('users').doc(uid).collection('fingerprints'); }
 
 async function ensureUserSalt(uid){
   const metaRef = metaDocRef(uid);
   const snap = await metaRef.get();
-  if(snap.exists){
-    const data = snap.data();
-    if(data.salt) { userSalt = data.salt; return userSalt; }
+  if(snap.exists && snap.data().salt){
+    userSalt = snap.data().salt;
+    return userSalt;
+  } else {
+    const saltBuf = crypto.getRandomValues(new Uint8Array(16));
+    userSalt = bufToHex(saltBuf);
+    await metaRef.set({ salt: userSalt });
+    return userSalt;
   }
-  const salt = bufToHex(crypto.getRandomValues(new Uint8Array(16)));
-  await metaRef.set({ salt });
-  userSalt = salt;
-  return salt;
 }
 
-/* ------------- Realtime fingerprint listener ------------- */
 let fpUnsubscribe = null;
 async function subscribeFingerprints(){
   if(!currentUID) return;
@@ -193,7 +186,6 @@ window.deleteFingerprint = async function(docId){
   show('Deleted','info');
 };
 
-/* ------------- WebAuthn helpers (client) ------------- */
 function abToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = '';
@@ -232,36 +224,37 @@ function parseAssertionResponse(assertion) {
   };
 }
 
-/* ------------- Server call wrappers (callable functions) ------------- */
-async function beginRegistrationServer() {
-  const fn = firebase.functions().httpsCallable('beginRegistration');
-  const resp = await fn({});
-  return resp.data;
-}
-async function finishRegistrationServer(attestationResponse) {
-  const fn = firebase.functions().httpsCallable('finishRegistration');
-  const resp = await fn(attestationResponse);
-  return resp.data;
-}
-async function beginLoginServer() {
-  const fn = firebase.functions().httpsCallable('beginLogin');
-  const resp = await fn({});
-  return resp.data;
-}
-async function finishLoginServer(assertionResponse) {
-  const fn = firebase.functions().httpsCallable('finishLogin');
-  const resp = await fn(assertionResponse);
-  return resp.data;
+async function getIdTokenHeader() {
+  const user = auth.currentUser;
+  if (!user) throw new Error('Not signed in');
+  const idToken = await user.getIdToken();
+  return { Authorization: 'Bearer ' + idToken };
 }
 
-/* ------------- Enrollment (server-assisted) ------------- */
+async function postJSON(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  try {
+    const authHeader = await getIdTokenHeader();
+    Object.assign(headers, authHeader);
+  } catch (e) {
+    // not signed in
+  }
+  const res = await fetch(path, {
+    method: 'POST', headers, body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Server ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
 if (enrollBtn) enrollBtn.addEventListener('click', async ()=>{
   if(!auth.currentUser){ show('Sign in first','info'); return; }
   if(!sessionKey){ show('Enter passphrase and press Set','info'); return; }
   const label = (fpLabel.value || `FP ${new Date().toLocaleString()}`).trim();
-
   try {
-    const options = await beginRegistrationServer();
+    const options = await postJSON('/api/beginRegistration', {});
     if(!options || !options.publicKey) throw new Error('Invalid server response');
 
     const publicKey = JSON.parse(JSON.stringify(options.publicKey));
@@ -274,13 +267,13 @@ if (enrollBtn) enrollBtn.addEventListener('click', async ()=>{
     const cred = await navigator.credentials.create({ publicKey });
     if(!cred) throw new Error('Credential creation failed');
 
-    const attestation = parseAttestationResponse(cred);
-    attestation.label = label;
+    const att = parseAttestationResponse(cred);
+    att.label = label;
 
-    const finishResp = await finishRegistrationServer(attestation);
-    if(!finishResp || !finishResp.success) throw new Error(finishResp && finishResp.error ? finishResp.error : 'Server registration failed');
+    const finishResp = await postJSON('/api/finishRegistration', att);
+    if (!finishResp || !finishResp.success) throw new Error(finishResp && finishResp.error || 'Server registration failed');
 
-    const metadata = { credentialId: attestation.rawId, label, createdAt: new Date().toISOString() };
+    const metadata = { credentialId: att.rawId, label, createdAt: new Date().toISOString() };
     const enc = await encryptObject(metadata);
     const docId = fingerprintsColRef(currentUID).doc().id;
     await fingerprintsColRef(currentUID).doc(docId).set({ iv: enc.iv, ct: enc.ct, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
@@ -294,19 +287,15 @@ if (enrollBtn) enrollBtn.addEventListener('click', async ()=>{
   }
 });
 
-/* ------------- Login (server-assisted) ------------- */
 if (unlockBtn) unlockBtn.addEventListener('click', async ()=>{
   if(!auth.currentUser){ show('Please sign in','info'); return; }
   show('Touch your authenticator...','info');
-
   try {
-    const options = await beginLoginServer();
+    const options = await postJSON('/api/beginLogin', {});
     if(!options || !options.publicKey) throw new Error('Invalid server response');
-
     const publicKey = {};
     publicKey.challenge = base64ToAb(options.publicKey.challenge);
     publicKey.userVerification = options.publicKey.userVerification || 'preferred';
-
     if (Array.isArray(options.publicKey.credentialIds) && options.publicKey.credentialIds.length) {
       publicKey.allowCredentials = options.publicKey.credentialIds.map(id => ({ type: 'public-key', id: base64ToAb(id) }));
     } else {
@@ -320,7 +309,7 @@ if (unlockBtn) unlockBtn.addEventListener('click', async ()=>{
     const parsed = parseAssertionResponse(assertion);
     parsed.userId = currentUID;
 
-    const finishResp = await finishLoginServer(parsed);
+    const finishResp = await postJSON('/api/finishLogin', parsed);
     if (finishResp && finishResp.success) {
       updateLockUI('UNLOCKED');
       logAccess('UNLOCK','FINGERPRINT','SUCCESS');
@@ -330,7 +319,6 @@ if (unlockBtn) unlockBtn.addEventListener('click', async ()=>{
       logAccess('UNLOCK','FINGERPRINT','FAILED');
       show('Passkey verification failed','error');
     }
-
   } catch(e){
     console.error(e);
     updateLockUI('LOCKED');
@@ -339,7 +327,6 @@ if (unlockBtn) unlockBtn.addEventListener('click', async ()=>{
   }
 });
 
-/* ------------- Passphrase & sync logic ------------- */
 if (setPassBtn) setPassBtn.addEventListener('click', async ()=>{
   const pass = passphraseInput.value;
   if(!pass){ passStatus.textContent='Enter passphrase'; return; }
@@ -366,76 +353,22 @@ if (syncBtn) syncBtn.addEventListener('click', async ()=>{
   show('Synced','info');
 });
 
-/* ------------- Bluetooth manager (minimal) ------------- */
 class BluetoothManager {
-  constructor(){
-    this.device = null;
-    this.server = null;
-    this.service = null;
-    this.characteristic = null;
-  }
-  async requestDevice(){
-    try{
-      this.device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
-      });
-      show('Device selected: '+(this.device && this.device.name ? this.device.name : 'Unnamed'),'info');
-      return this.device;
-    } catch(e){ throw e; }
-  }
-  async connect(){
-    if(!this.device) await this.requestDevice();
-    if(!this.device.gatt) throw new Error('No GATT on device');
-    this.server = await this.device.gatt.connect();
-    this.service = await this.server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
-    this.characteristic = await this.service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb');
-    show('Bluetooth connected','info');
-  }
-  async send(text){
-    if(!this.characteristic) await this.connect();
-    const encoder = new TextEncoder();
-    await this.characteristic.writeValue(encoder.encode(text));
-  }
+  constructor(){ this.device=null; this.server=null; this.service=null; this.characteristic=null; }
+  async requestDevice(){ this.device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb'] }); show('Device selected: '+(this.device && this.device.name ? this.device.name : 'Unnamed'),'info'); return this.device; }
+  async connect(){ if(!this.device) await this.requestDevice(); if(!this.device.gatt) throw new Error('No GATT on device'); this.server = await this.device.gatt.connect(); this.service = await this.server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb'); this.characteristic = await this.service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb'); show('Bluetooth connected','info'); }
+  async send(text){ if(!this.characteristic) await this.connect(); await this.characteristic.writeValue(new TextEncoder().encode(text)); }
 }
 const bt = new BluetoothManager();
-if (connectBtBtn) connectBtBtn.addEventListener('click', async ()=> {
-  try { await bt.requestDevice(); await bt.connect(); } catch(e){ show('BT error: '+(e.message||e),'error'); }
-});
+if (connectBtBtn) connectBtBtn.addEventListener('click', async ()=> { try { await bt.requestDevice(); await bt.connect(); } catch(e){ show('BT error: '+(e.message||e),'error'); } });
 
-/* ------------- Devices list ------------- */
-async function loadDevices(){
-  if(!currentUID) return devicesList.innerHTML = `<div class="muted">Sign in</div>`;
-  const snap = await db.collection('users').doc(currentUID).collection('devices').get();
-  if(snap.empty) return devicesList.innerHTML = `<div class="muted">No devices</div>`;
-  devicesList.innerHTML = snap.docs.map(d=>{
-    const data = d.data();
-    return `<div class="device-item"><div><strong>${escapeHtml(data.name||'Device')}</strong><div class="muted">${escapeHtml(data.id||'')}</div></div><div><button class="btn small" onclick="connectDevice('${d.id}')">Connect</button></div></div>`;
-  }).join('');
-}
-window.connectDevice = async function(docId){
-  const doc = await db.collection('users').doc(currentUID).collection('devices').doc(docId).get();
-  if(!doc.exists) return show('Device not found','info');
-  const data = doc.data();
-  show('Attempting connect to '+(data.name||'device'),'info');
-};
+async function loadDevices(){ if(!currentUID) return devicesList.innerHTML = `<div class="muted">Sign in</div>`; const snap = await db.collection('users').doc(currentUID).collection('devices').get(); if(snap.empty) return devicesList.innerHTML = `<div class="muted">No devices</div>`; devicesList.innerHTML = snap.docs.map(d=>{ const data = d.data(); return `<div class="device-item"><div><strong>${escapeHtml(data.name||'Device')}</strong><div class="muted">${escapeHtml(data.id||'')}</div></div><div><button class="btn small" onclick="connectDevice('${d.id}')">Connect</button></div></div>`; }).join(''); }
+window.connectDevice = async function(docId){ const doc = await db.collection('users').doc(currentUID).collection('devices').doc(docId).get(); if(!doc.exists) return show('Device not found','info'); show('Attempting connect','info'); }
 
-/* ------------- Logs ------------- */
-function logAccess(action, method, status){
-  const logs = JSON.parse(localStorage.getItem('accessLogs')||'[]');
-  logs.unshift({ timestamp: new Date().toLocaleString(), action, method, status });
-  if(logs.length>200) logs.pop();
-  localStorage.setItem('accessLogs', JSON.stringify(logs));
-  renderLogs();
-}
-function renderLogs(){
-  const logs = JSON.parse(localStorage.getItem('accessLogs')||'[]');
-  if(!logs.length) return logsList.innerHTML = `<div class="muted">No logs</div>`;
-  logsList.innerHTML = logs.map(l=>`<div class="log-item"><div><strong>${l.timestamp}</strong><div class="muted">${l.method}</div></div><div>${l.action}</div><div>${l.status}</div></div>`).join('');
-}
+function logAccess(action, method, status){ const logs = JSON.parse(localStorage.getItem('accessLogs')||'[]'); logs.unshift({ timestamp: new Date().toLocaleString(), action, method, status }); if(logs.length>200) logs.pop(); localStorage.setItem('accessLogs', JSON.stringify(logs)); renderLogs(); }
+function renderLogs(){ const logs = JSON.parse(localStorage.getItem('accessLogs')||'[]'); if(!logs.length) return logsList.innerHTML = `<div class="muted">No logs</div>`; logsList.innerHTML = logs.map(l=>`<div class="log-item"><div><strong>${l.timestamp}</strong><div class="muted">${l.method}</div></div><div>${l.action}</div><div>${l.status}</div></div>`).join(''); }
 if (clearLogsBtn) clearLogsBtn.addEventListener('click', ()=> { if(confirm('Clear logs?')){ localStorage.removeItem('accessLogs'); renderLogs(); } });
 
-/* ------------- Auth state changes ------------- */
 auth.onAuthStateChanged(async user=>{
   if(user){
     currentUID = user.uid;
@@ -455,13 +388,6 @@ auth.onAuthStateChanged(async user=>{
   }
 });
 
-/* ------------- Lock UI ------------- */
-function updateLockUI(state){
-  if(state==='UNLOCKED'){ lockIcon.textContent='🔓'; lockIcon.classList.remove('locked'); lockIcon.classList.add('unlocked'); lockStatus.textContent='UNLOCKED'; }
-  else { lockIcon.textContent='🔒'; lockIcon.classList.remove('unlocked'); lockIcon.classList.add('locked'); lockStatus.textContent='LOCKED'; }
-}
+function updateLockUI(state){ if(state==='UNLOCKED'){ lockIcon.textContent='🔓'; lockIcon.classList.remove('locked'); lockIcon.classList.add('unlocked'); lockStatus.textContent='UNLOCKED'; } else { lockIcon.textContent='🔒'; lockIcon.classList.remove('unlocked'); lockIcon.classList.add('locked'); lockStatus.textContent='LOCKED'; } }
 
-/* ------------- Startup ------------- */
-(function init(){
-  renderLogs();
-})();
+(function init(){ renderLogs(); })();

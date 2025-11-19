@@ -5,11 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Smart Door Lock</title>
   <link rel="stylesheet" href="styles.css" />
-  <!-- Firebase SDKs -->
+  <!-- Firebase SDKs (compat) -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-functions-compat.js"></script>
   <meta http-equiv="Cache-Control" content="no-store" />
 </head>
 <body>
@@ -34,7 +33,6 @@
   </header>
 
   <main class="container">
-    <!-- HOME -->
     <section id="home" class="page active">
       <div class="card center">
         <div id="lockIcon" class="lock-icon locked">🔒</div>
@@ -49,7 +47,6 @@
       </div>
     </section>
 
-    <!-- ENROLL -->
     <section id="enroll" class="page">
       <div class="card">
         <h3>Enroll Fingerprint (Passkey)</h3>
@@ -75,7 +72,6 @@
       </div>
     </section>
 
-    <!-- DEVICES -->
     <section id="devices" class="page">
       <div class="card">
         <h3>Paired / Saved Devices</h3>
@@ -83,7 +79,6 @@
       </div>
     </section>
 
-    <!-- LOGS -->
     <section id="logs" class="page">
       <div class="card">
         <div class="row space-between">
@@ -95,7 +90,6 @@
     </section>
   </main>
 
-  <!-- Auth Modal -->
   <div id="authModal" class="modal" aria-hidden="true">
     <div class="modal-card">
       <h3>Sign in / Register</h3>

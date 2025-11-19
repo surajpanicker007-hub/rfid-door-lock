@@ -1,0 +1,10 @@
+{
+  "name": "smart-door-lock",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "base64url": "^3.0.1",
+    "fido2-lib": "^3.3.4",
+    "firebase-admin": "^11.0.0"
+  }
+}

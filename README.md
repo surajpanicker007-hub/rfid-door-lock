@@ -1,46 +1,42 @@
-# Smart Door Lock — Full App (Client + Server-side WebAuthn)
+# Smart Door Lock — Vercel + Firestore + WebAuthn (server-side)
 
 ## Overview
-- Frontend: static site (index.html, styles.css, app.js) — host on Vercel or any static host
-- Backend: Firebase (Auth, Firestore) + Cloud Functions (server-side WebAuthn using fido2-lib)
-- Client uses WebAuthn with server challenges and `allowCredentials` (cross-device passkeys)
-- Fingerprint metadata encrypted client-side with AES-GCM derived from a passphrase
+Frontend: static site deployed on Vercel.  
+Server: Vercel Serverless Functions (/api/*) implement WebAuthn server flows using `fido2-lib` and Firebase Admin SDK.  
+Firestore stores user data (`users/{uid}/...`) and server stores WebAuthn credentials under `webauthn/{uid}/...` via Admin SDK.
 
-## Setup
+## Setup steps
 
-### 1. Firebase project
-- Create project in Firebase Console
-- Enable Authentication: Email/Password and Google Sign-In
-- Add authorized domains (your-vercel-domain.vercel.app, localhost)
-- Create Firestore database (production mode)
-- Deploy Cloud Functions (see `functions` folder)
-- Add Firestore rules from README (restrict direct web access to /webauthn)
+1. **Firebase**
+   - Create Firebase project.
+   - Enable Authentication (Email/Password, Google).
+   - Create Firestore database.
+   - Add your Vercel domain to Authorized domains (Auth settings).
 
-### 2. Cloud Functions
-- `cd functions`
-- `npm install`
-- Set env var for `RP_DOMAIN` or `ORIGIN` if required:
-- `firebase deploy --only functions`
+2. **Service account**
+   - In Firebase Console → Project Settings → Service accounts → Generate new private key (JSON).
+   - Copy the JSON contents. In Vercel project settings, add environment variable:
+     - `FIREBASE_SERVICE_ACCOUNT` = (paste JSON as single-line string)
+   - Also add:
+     - `FIREBASE_PROJECT_ID` = your project id
+     - `RP_ID` = your domain (e.g., yourdomain.vercel.app) — recommended
+     - `ORIGIN` = `https://yourdomain.vercel.app` (used in verification)
 
-### 3. Frontend
-- Fill `firebaseConfig.js` with your Firebase web app config.
-- Deploy static site to Vercel (or use `firebase hosting`).
+3. **Deploy to Vercel**
+   - Push this repo to Git provider and import to Vercel.
+   - Vercel will install dependencies and deploy.
+   - Make sure environment variables are set in Vercel.
 
-### 4. Test
-- Sign in with email on Device A
-- In Enroll page, set passphrase, enroll a passkey (WebAuthn)
-- Check Cloud Functions logs for registration success
-- On Device B (same user), sign in; in Home -> Unlock should call beginLogin -> server returns allowed credential IDs -> browser shows passkey prompt
+4. **Frontend**
+   - Edit `firebaseConfig.js` with your web app config (from Firebase Console).
+   - Deploy, open site.
 
-## Notes & Security
-- Do not store raw biometric scans — we only store credential IDs / public keys on server.
-- Client encrypts fingerprint metadata with passphrase-derived AES-GCM key — server does not have passphrase.
-- For production, consider:
-- Using WebAuthn resident keys or relying on platform passkeys UX improvements
-- Server-side assertion attestation verification with strict origins and rpId
-- Rate-limiting and monitoring Cloud Functions
+5. **Test**
+   - Sign in on Device A → Enroll passkey → Server `webauthn` collection should contain credential docs.
+   - Sign in on Device B → Unlock should call `beginLogin` and the browser should show passkey choices.
 
-## Tests
-- `tests/ui-walkthrough.md` contains manual steps
-- `tests/e2e.test.js` contains Puppeteer (or Playwright) skeleton for automation
+## Notes
+- Vercel functions will run on demand; Firestore and Admin SDK are used in server functions.
+- Keep `FIREBASE_SERVICE_ACCOUNT` secret.
+- For production, ensure `RP_ID` and `ORIGIN` match exactly your site domain.
 
