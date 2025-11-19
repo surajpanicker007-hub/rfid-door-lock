@@ -1,5 +1,5 @@
 :root{
-  --bg:#f5f7fb; --card:#fff; --muted:#6b7280; --primary:#2563eb;
+  --bg:#f4f7fb; --card:#fff; --muted:#6b7280; --primary:#2563eb;
   --accent:#6d28d9; --danger:#dc2626; --success:#16a34a;
   --radius:12px; --maxw:1100px;
 }
@@ -14,39 +14,22 @@ body{margin:0;font-family:Inter,Segoe UI,Roboto,sans-serif;background:linear-gra
 .nav-links .nav-link.active{background:#eef2ff;color:var(--primary)}
 .auth-area{display:flex;align-items:center;gap:8px}
 .user-email{color:#475569;font-size:0.9rem}
-.nav-toggle{display:none}
-@media(max-width:800px){.nav-links{display:none;position:absolute;right:16px;top:60px;background:#fff;padding:12px;border-radius:8px;box-shadow:0 6px 20px rgba(2,6,23,0.08)}.nav-links.active{display:flex;flex-direction:column}.nav-toggle{display:block}}
-
 .card{background:var(--card);padding:18px;border-radius:var(--radius);box-shadow:0 8px 30px rgba(2,6,23,0.04);margin-bottom:16px}
 .center{text-align:center}
 .lock-icon{font-size:3.8rem}
 .lock-icon.locked{color:var(--danger)}
 .lock-icon.unlocked{color:var(--success)}
 .lock-text{font-weight:700;margin-top:6px}
-
 .btn{border:0;padding:10px 14px;border-radius:10px;cursor:pointer}
 .small{padding:6px 10px;font-size:0.9rem}
 .primary{background:var(--primary);color:white}
 .secondary{background:#e6eefc}
 .success{background:var(--success);color:white}
-.google{background:white;border:1px solid #e2e8f0}
 input{width:100%;padding:10px;border:1px solid #e6e9ef;border-radius:8px;margin-top:8px}
-
 .row{display:flex;gap:10px;margin-top:10px}
 .row.space-between{display:flex;justify-content:space-between;align-items:center}
 .muted{color:var(--muted);font-size:0.95rem}
 .notification{margin-top:12px;padding:10px;border-radius:8px;display:none}
 .notification.show{display:block}
-
-#usersList .user-item,#devicesList .device-item,#logsList .log-item{
-  padding:10px;border-radius:8px;background:#fcfeff;border-left:4px solid var(--accent);display:flex;justify-content:space-between;align-items:center;margin-top:8px
-}
-
-.modal{position:fixed;inset:0;background:rgba(2,6,23,0.45);display:flex;align-items:center;justify-content:center;visibility:hidden;opacity:0;transition:all .12s}
-.modal[aria-hidden="false"]{visibility:visible;opacity:1}
-.modal-card{background:#fff;padding:18px;border-radius:10px;min-width:320px;box-shadow:0 12px 40px rgba(2,6,23,0.12)}
-
-@media(max-width:720px){
-  .container{padding:12px}
-  .row{flex-direction:column}
-}
+#usersList .user-item,#logsList .log-item{padding:10px;border-radius:8px;background:#fcfeff;border-left:4px solid var(--accent);display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+@media(max-width:720px){.row{flex-direction:column}}

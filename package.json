@@ -1,11 +1,11 @@
 {
-  "type": "module",
   "name": "smart-door-lock",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "dependencies": {
+    "@simplewebauthn/server": "^6.0.0",
     "base64url": "^3.0.1",
-    "fido2-lib": "^3.3.4",
-    "firebase-admin": "^12.0.0"
+    "firebase-admin": "^11.11.0"
   }
 }

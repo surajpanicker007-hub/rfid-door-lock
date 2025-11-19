@@ -1,48 +1,44 @@
 // api/beginLogin.js
-const base64url = require('base64url');
-const { Fido2Lib } = require('fido2-lib');
-const initAdmin = require('./_admin');
+import { initAdmin } from "./_admin.js";
+import { generateAuthenticationOptions } from "@simplewebauthn/server";
+import base64url from "base64url";
 
-const f2l = new Fido2Lib({
-  timeout: 60000,
-  rpId: process.env.RP_ID || undefined,
-  rpName: "Smart Door Lock",
-  challengeSize: 32
-});
+const RP_ID = process.env.RP_ID || undefined;
+const ORIGIN = process.env.ORIGIN || undefined;
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   try {
-    if (req.method !== 'POST') return res.status(405).send('Method not allowed');
-
-    const authHeader = req.headers.authorization || '';
-    const token = (authHeader.match(/^Bearer (.+)$/) || [])[1];
-    if (!token) return res.status(401).json({ error: 'Missing id token' });
-
+    if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
     const admin = initAdmin();
-    const decoded = await admin.auth().verifyIdToken(token);
+
+    const authHeader = req.headers.authorization || "";
+    const idToken = (authHeader.match(/^Bearer (.+)$/) || [])[1];
+    if (!idToken) return res.status(401).json({ error: "Missing Authorization token" });
+    const decoded = await admin.auth().verifyIdToken(idToken);
     const uid = decoded.uid;
 
-    const options = await f2l.assertionOptions();
-    const challengeB64 = base64url(options.challenge);
+    // fetch saved credential ids for user
+    const credsSnap = await admin.firestore().collection("webauthn").doc(uid).collection("credentials").get();
+    const allowedCreds = credsSnap.docs.map(d => ({
+      id: d.id,
+      type: "public-key"
+    }));
 
-    const credSnap = await admin.firestore().collection('webauthn').doc(uid).collection('credentials').get();
-    const credentialIds = credSnap.docs.map(d => d.id);
+    const opts = generateAuthenticationOptions({
+      rpID: RP_ID,
+      allowCredentials: allowedCreds,
+      userVerification: "preferred"
+    });
 
-    await admin.firestore().collection('webauthn').doc(uid).collection('challenges').doc('login').set({
-      challenge: challengeB64,
+    // store challenge
+    await admin.firestore().collection("webauthn").doc(uid).collection("challenges").doc("login").set({
+      challenge: opts.challenge,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    return res.json({
-      publicKey: {
-        challenge: challengeB64,
-        credentialIds: credentialIds,
-        userVerification: options.userVerification || 'preferred',
-        rpId: process.env.RP_ID || undefined
-      }
-    });
+    return res.json({ publicKey: opts, rpId: RP_ID, origin: ORIGIN });
   } catch (err) {
-    console.error('beginLogin error', err);
+    console.error("beginLogin error:", err);
     return res.status(500).json({ error: err.message || String(err) });
   }
-};
+}
