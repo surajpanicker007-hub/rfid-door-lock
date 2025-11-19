@@ -1,72 +1,89 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta http-equiv="Cache-Control" content="no-store" />
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Smart Door Lock</title>
-
-  <!-- Styles -->
   <link rel="stylesheet" href="styles.css" />
 
   <!-- Firebase compat SDKs (CDN) -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+  <meta http-equiv="Cache-Control" content="no-store" />
 </head>
 <body>
-  <nav class="navbar">
-    <div class="nav-container">
-      <h1 class="logo">🔐 Smart Door Lock</h1>
-      <ul class="nav-menu">
-        <li><a class="nav-link active" data-page="home">Home</a></li>
-        <li><a class="nav-link" data-page="enroll">Enroll</a></li>
-        <li><a class="nav-link" data-page="logs">Logs</a></li>
-      </ul>
-      <div class="auth-controls">
-        <span id="userEmail" class="user-email"></span>
-        <button id="btnSignOut" class="btn small" style="display:none">Sign out</button>
-        <button id="btnSignIn" class="btn small">Sign in</button>
-      </div>
-    </div>
-  </nav>
+  <!-- NAV -->
+  <header class="nav">
+    <div class="nav-inner">
+      <div class="logo">🔐 Smart Door Lock</div>
+      <nav class="nav-links" id="navLinks">
+        <a href="#" data-page="home" class="nav-link active">Home</a>
+        <a href="#" data-page="enroll" class="nav-link">Enroll</a>
+        <a href="#" data-page="devices" class="nav-link">Devices</a>
+        <a href="#" data-page="logs" class="nav-link">Logs</a>
+      </nav>
 
+      <div class="auth-area">
+        <span id="userEmail" class="user-email"></span>
+        <button id="btnSignIn" class="btn small">Sign in</button>
+        <button id="btnSignOut" class="btn small" style="display:none">Sign out</button>
+      </div>
+
+      <button id="navToggle" class="nav-toggle">☰</button>
+    </div>
+  </header>
+
+  <!-- PAGES -->
   <main class="container">
     <!-- HOME -->
     <section id="home" class="page active">
-      <div class="card">
-        <div class="lock-status">
-          <div id="lockIcon" class="lock-icon locked">🔒</div>
-          <div id="lockStatus" class="lock-text">LOCKED</div>
-        </div>
+      <div class="card center">
+        <div class="lock-icon locked" id="lockIcon">🔒</div>
+        <div id="lockStatus" class="lock-text">LOCKED</div>
 
         <div class="controls">
-          <!-- Note: LOCK button intentionally removed -->
-          <button id="unlockBtn" class="btn primary">🔓 Unlock (Authenticate)</button>
-          <button id="btnConnectBT" class="btn secondary">Connect Bluetooth</button>
+          <button id="connectBtBtn" class="btn primary">Connect Bluetooth</button>
+          <button id="unlockBtn" class="btn success">Unlock (Auth)</button>
         </div>
 
-        <div id="notification" class="notification"></div>
+        <div id="homeNote" class="muted">Unlock requires authentication (WebAuthn).</div>
+        <div id="notif" class="notification"></div>
       </div>
     </section>
 
     <!-- ENROLL -->
     <section id="enroll" class="page">
       <div class="card">
-        <h2>Manage Users</h2>
-
-        <div class="form">
-          <label for="userName">User name</label>
-          <input id="userName" type="text" placeholder="Name (eg. Akilesh Thumb)" />
-          <div class="row">
-            <button id="enrollBtn" class="btn primary">Enroll Fingerprint</button>
-            <button id="syncBtn" class="btn secondary">Sync now</button>
-          </div>
-          <p id="enrollStatus" class="muted"></p>
+        <h3>Enroll Fingerprint</h3>
+        <label>Label</label>
+        <input id="fpLabel" placeholder="e.g. Left Thumb" />
+        <div class="row">
+          <button id="enrollBtn" class="btn primary">Enroll (WebAuthn)</button>
+          <button id="syncBtn" class="btn secondary">Sync Now</button>
         </div>
 
-        <h3>Registered Fingerprints</h3>
+        <h4 style="margin-top:18px">Registered</h4>
         <div id="usersList"></div>
+
+        <hr />
+        <h4>Encryption passphrase</h4>
+        <p class="muted">A passphrase is required to encrypt/decrypt fingerprint metadata across your devices. It is never sent to the server.</p>
+        <input id="passphrase" type="password" placeholder="Enter passphrase" />
+        <div class="row">
+          <button id="setPassBtn" class="btn primary">Set / Derive Key</button>
+          <button id="clearPassBtn" class="btn secondary">Clear</button>
+        </div>
+        <p id="passStatus" class="muted"></p>
+      </div>
+    </section>
+
+    <!-- DEVICES -->
+    <section id="devices" class="page">
+      <div class="card">
+        <h3>Paired Devices</h3>
+        <div id="devicesList"></div>
       </div>
     </section>
 
@@ -74,32 +91,34 @@
     <section id="logs" class="page">
       <div class="card">
         <div class="row space-between">
-          <h2>Access Logs</h2>
-          <button id="clearLogsBtn" class="btn secondary">Clear logs</button>
+          <h3>Access Logs</h3>
+          <button id="clearLogsBtn" class="btn secondary">Clear</button>
         </div>
-        <div id="logsList" class="logs-list"></div>
+        <div id="logsList"></div>
       </div>
     </section>
   </main>
 
-  <!-- Sign-in Modal (simple email/password) -->
+  <!-- Sign-in modal -->
   <div id="authModal" class="modal" aria-hidden="true">
-    <div class="modal-content">
-      <h3>Sign in / Register</h3>
-      <input id="authEmail" type="email" placeholder="Email" />
-      <input id="authPassword" type="password" placeholder="Password" />
+    <div class="modal-card">
+      <h3>Sign in</h3>
+      <input id="authEmail" placeholder="Email" type="email" />
+      <input id="authPassword" placeholder="Password" type="password" />
       <div class="row">
         <button id="btnRegister" class="btn primary">Register</button>
         <button id="btnLogin" class="btn secondary">Sign in</button>
       </div>
-      <button id="btnCloseAuth" class="btn small">Close</button>
+      <div style="margin-top:12px">
+        <button id="googleLogin" class="btn google">Continue with Google</button>
+      </div>
+      <button id="closeAuth" class="btn small">Close</button>
       <p id="authMsg" class="muted"></p>
     </div>
   </div>
 
-  <!-- Firebase config file (fill your config) -->
+  <!-- Firebase config (edit and add your keys) -->
   <script src="firebaseConfig.js"></script>
-
   <!-- Main app -->
   <script src="app.js"></script>
 </body>
