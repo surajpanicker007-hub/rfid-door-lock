@@ -2,27 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Smart Door Lock</title>
   <link rel="stylesheet" href="styles.css" />
-
-  <!-- Firebase compat SDKs (CDN) -->
+  <!-- Firebase SDKs -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
-
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-functions-compat.js"></script>
   <meta http-equiv="Cache-Control" content="no-store" />
 </head>
 <body>
-  <!-- NAV -->
   <header class="nav">
     <div class="nav-inner">
       <div class="logo">🔐 Smart Door Lock</div>
       <nav class="nav-links" id="navLinks">
-        <a href="#" data-page="home" class="nav-link active">Home</a>
-        <a href="#" data-page="enroll" class="nav-link">Enroll</a>
-        <a href="#" data-page="devices" class="nav-link">Devices</a>
-        <a href="#" data-page="logs" class="nav-link">Logs</a>
+        <a href="#" class="nav-link active" data-page="home">Home</a>
+        <a href="#" class="nav-link" data-page="enroll">Enroll</a>
+        <a href="#" class="nav-link" data-page="devices">Devices</a>
+        <a href="#" class="nav-link" data-page="logs">Logs</a>
       </nav>
 
       <div class="auth-area">
@@ -35,20 +33,18 @@
     </div>
   </header>
 
-  <!-- PAGES -->
   <main class="container">
     <!-- HOME -->
     <section id="home" class="page active">
       <div class="card center">
-        <div class="lock-icon locked" id="lockIcon">🔒</div>
+        <div id="lockIcon" class="lock-icon locked">🔒</div>
         <div id="lockStatus" class="lock-text">LOCKED</div>
 
         <div class="controls">
           <button id="connectBtBtn" class="btn primary">Connect Bluetooth</button>
-          <button id="unlockBtn" class="btn success">Unlock (Auth)</button>
+          <button id="unlockBtn" class="btn success">Unlock (Passkey)</button>
         </div>
 
-        <div id="homeNote" class="muted">Unlock requires authentication (WebAuthn).</div>
         <div id="notif" class="notification"></div>
       </div>
     </section>
@@ -56,12 +52,12 @@
     <!-- ENROLL -->
     <section id="enroll" class="page">
       <div class="card">
-        <h3>Enroll Fingerprint</h3>
+        <h3>Enroll Fingerprint (Passkey)</h3>
         <label>Label</label>
         <input id="fpLabel" placeholder="e.g. Left Thumb" />
         <div class="row">
           <button id="enrollBtn" class="btn primary">Enroll (WebAuthn)</button>
-          <button id="syncBtn" class="btn secondary">Sync Now</button>
+          <button id="syncBtn" class="btn secondary">Sync now</button>
         </div>
 
         <h4 style="margin-top:18px">Registered</h4>
@@ -69,7 +65,7 @@
 
         <hr />
         <h4>Encryption passphrase</h4>
-        <p class="muted">A passphrase is required to encrypt/decrypt fingerprint metadata across your devices. It is never sent to the server.</p>
+        <p class="muted">Passphrase encrypts fingerprint metadata for cross-device sync (not sent to server).</p>
         <input id="passphrase" type="password" placeholder="Enter passphrase" />
         <div class="row">
           <button id="setPassBtn" class="btn primary">Set / Derive Key</button>
@@ -82,7 +78,7 @@
     <!-- DEVICES -->
     <section id="devices" class="page">
       <div class="card">
-        <h3>Paired Devices</h3>
+        <h3>Paired / Saved Devices</h3>
         <div id="devicesList"></div>
       </div>
     </section>
@@ -99,10 +95,10 @@
     </section>
   </main>
 
-  <!-- Sign-in modal -->
+  <!-- Auth Modal -->
   <div id="authModal" class="modal" aria-hidden="true">
     <div class="modal-card">
-      <h3>Sign in</h3>
+      <h3>Sign in / Register</h3>
       <input id="authEmail" placeholder="Email" type="email" />
       <input id="authPassword" placeholder="Password" type="password" />
       <div class="row">
@@ -117,11 +113,7 @@
     </div>
   </div>
 
-  <!-- Firebase config (edit and add your keys) -->
   <script src="firebaseConfig.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-functions-compat.js"></script>
-
-  <!-- Main app -->
   <script src="app.js"></script>
 </body>
 </html>

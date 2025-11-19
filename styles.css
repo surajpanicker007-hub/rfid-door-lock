@@ -10,24 +10,20 @@ body{margin:0;font-family:Inter,Segoe UI,Roboto,sans-serif;background:linear-gra
 .nav-inner{max-width:var(--maxw);margin:0 auto;display:flex;align-items:center;gap:12px;justify-content:space-between}
 .logo{font-weight:700}
 .nav-links{display:flex;gap:12px}
-.nav-links .nav-link{color:#334155;text-decoration:none;padding:8px;border-radius:8px}
+.nav-links .nav-link{color:#334155;text-decoration:none;padding:8px;border-radius:8px;cursor:pointer}
 .nav-links .nav-link.active{background:#eef2ff;color:var(--primary)}
 .auth-area{display:flex;align-items:center;gap:8px}
 .user-email{color:#475569;font-size:0.9rem}
 .nav-toggle{display:none}
 @media(max-width:800px){.nav-links{display:none;position:absolute;right:16px;top:60px;background:#fff;padding:12px;border-radius:8px;box-shadow:0 6px 20px rgba(2,6,23,0.08)}.nav-links.active{display:flex;flex-direction:column}.nav-toggle{display:block}}
 
-/* Card */
 .card{background:var(--card);padding:18px;border-radius:var(--radius);box-shadow:0 8px 30px rgba(2,6,23,0.04);margin-bottom:16px}
 .center{text-align:center}
-
-/* Lock UI */
 .lock-icon{font-size:3.8rem}
 .lock-icon.locked{color:var(--danger)}
 .lock-icon.unlocked{color:var(--success)}
 .lock-text{font-weight:700;margin-top:6px}
 
-/* Buttons & input */
 .btn{border:0;padding:10px 14px;border-radius:10px;cursor:pointer}
 .small{padding:6px 10px;font-size:0.9rem}
 .primary{background:var(--primary);color:white}
@@ -36,19 +32,16 @@ body{margin:0;font-family:Inter,Segoe UI,Roboto,sans-serif;background:linear-gra
 .google{background:white;border:1px solid #e2e8f0}
 input{width:100%;padding:10px;border:1px solid #e6e9ef;border-radius:8px;margin-top:8px}
 
-/* layout */
 .row{display:flex;gap:10px;margin-top:10px}
 .row.space-between{display:flex;justify-content:space-between;align-items:center}
 .muted{color:var(--muted);font-size:0.95rem}
 .notification{margin-top:12px;padding:10px;border-radius:8px;display:none}
 .notification.show{display:block}
 
-/* lists */
 #usersList .user-item,#devicesList .device-item,#logsList .log-item{
   padding:10px;border-radius:8px;background:#fcfeff;border-left:4px solid var(--accent);display:flex;justify-content:space-between;align-items:center;margin-top:8px
 }
 
-/* modal */
 .modal{position:fixed;inset:0;background:rgba(2,6,23,0.45);display:flex;align-items:center;justify-content:center;visibility:hidden;opacity:0;transition:all .12s}
 .modal[aria-hidden="false"]{visibility:visible;opacity:1}
 .modal-card{background:#fff;padding:18px;border-radius:10px;min-width:320px;box-shadow:0 12px 40px rgba(2,6,23,0.12)}
