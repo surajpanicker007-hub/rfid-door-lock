@@ -1,0 +1,792 @@
+    /**************************************************************************
+     * Configuration - REPLACE the firebaseConfig object with your project's
+     * Firebase config from the Firebase console.
+     **************************************************************************/
+    const firebaseConfig = {
+    apiKey: "AIzaSyBrAN0V190iSHYEN_3P4vGIDNPElefIGyk",
+    authDomain: "rfid-door-lock-8e13b.firebaseapp.com",
+    projectId: "rfid-door-lock-8e13b",
+    storageBucket: "rfid-door-lock-8e13b.firebasestorage.app",
+    messagingSenderId: "193568206670",
+    appId: "1:193568206670:web:f95083526b02bccc02f81f",
+    measurementId: "G-GMFRW02DNL"
+    };
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    /**************************************************************************
+     * Utility: showNotification (reused)
+     **************************************************************************/
+    function showNotification(message, type='info') {
+        const notif = document.getElementById('notification');
+        notif.textContent = message;
+        notif.className = `notification show ${type}`;
+        setTimeout(() => notif.classList.remove('show'), 5000);
+    }
+
+    /**************************************************************************
+     * Encryption helpers - AES-GCM using a key derived from user UID
+     * This allows the same Google account to decrypt across devices.
+     * Note: In production you'd use stronger key management (KMS) or server-side
+     * key derivation. This is a simple deterministic approach for cross-device.
+     **************************************************************************/
+    async function deriveKeyFromUid(uid) {
+        // Create a raw 32-byte key material by hashing the UID (deterministic)
+        const uidBytes = new TextEncoder().encode(uid);
+        const hash = await crypto.subtle.digest('SHA-256', uidBytes); // 32 bytes
+        return crypto.subtle.importKey('raw', hash, 'AES-GCM', false, ['encrypt','decrypt']);
+    }
+
+    async function encryptJSON(obj, key) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const data = new TextEncoder().encode(JSON.stringify(obj));
+        const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+        // store as base64 strings
+        return { iv: arrayBufferToBase64(iv), data: arrayBufferToBase64(cipher) };
+    }
+
+    async function decryptJSON(enc, key) {
+        try {
+            const iv = base64ToArrayBuffer(enc.iv);
+            const data = base64ToArrayBuffer(enc.data);
+            const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+            return JSON.parse(new TextDecoder().decode(plain));
+        } catch (e) {
+            console.error('decrypt error', e);
+            return null;
+        }
+    }
+
+    function arrayBufferToBase64(buf) {
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        for (let i=0;i<bytes.byteLength;i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+    }
+    function base64ToArrayBuffer(base64) {
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i=0;i<len;i++) bytes[i] = binary.charCodeAt(i);
+        return bytes.buffer;
+    }
+
+    /**************************************************************************
+     * Auth: Google sign-in (Firebase)
+     **************************************************************************/
+    const signInBtn = document.getElementById('signInBtn');
+    const signOutBtn = document.getElementById('signOutBtn');
+
+    async function signInWithGoogle() {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        try {
+            await auth.signInWithPopup(provider);
+            // auth state change handler will update UI
+        } catch (e) {
+            console.error('Sign in error:', e);
+            showNotification('Google sign-in failed: ' + (e.message || e), 'error');
+        }
+    }
+
+    async function signOut() {
+        await auth.signOut();
+    }
+
+    signInBtn.addEventListener('click', signInWithGoogle);
+    signOutBtn.addEventListener('click', signOut);
+
+    auth.onAuthStateChanged(async (user) => {
+        if (user) {
+            signInBtn.style.display = 'none';
+            signOutBtn.style.display = 'inline-flex';
+            showNotification(`Signed in as ${user.displayName || user.email}`, 'success');
+            // load stored users and logs now that we have an account
+            await fingerprintManager.loadFromServer();
+            updateUsersList();
+            loadLogs();
+            // initialize bluetooth cloud bridge listener (if used)
+            cloudBridge.initForUser(user.uid);
+        } else {
+            signInBtn.style.display = 'inline-flex';
+            signOutBtn.style.display = 'none';
+            showNotification('Signed out', 'info');
+            // keep local state
+            fingerprintManager.loadFromLocal();
+            updateUsersList();
+            loadLogs();
+        }
+    });
+
+    /**************************************************************************
+     * FingerprintManager with Firestore sync + WebAuthn registration/auth.
+     * Keeps local storage fallback for offline mode.
+     **************************************************************************/
+    class FingerprintManager {
+        constructor() {
+            this.enrolledUsers = [];   // decrypted list of { id, userName, pin, enrolledDate, encryptedData? }
+            this.localKeyName = 'enrolledUsersLocal';
+            this.user = null; // firebase user
+            this.credentialId_b64 = null; // WebAuthn credential id (base64)
+        }
+
+        // load only from local storage
+        loadFromLocal() {
+            try {
+                const users = localStorage.getItem(this.localKeyName);
+                this.enrolledUsers = users ? JSON.parse(users) : [];
+            } catch (e) {
+                console.error('loadFromLocal error', e);
+                this.enrolledUsers = [];
+            }
+        }
+
+        // load from Firestore (if authenticated), otherwise local
+        async loadFromServer() {
+            const user = auth.currentUser;
+            if (!user) {
+                this.loadFromLocal();
+                return;
+            }
+            this.user = user;
+            // derive key for encryption using UID
+            this._cryptoKey = await deriveKeyFromUid(user.uid);
+            try {
+                // user doc: users/{uid}/appData/users (single doc)
+                const docRef = db.collection('users').doc(user.uid);
+                const doc = await docRef.get();
+                if (!doc.exists) {
+                    // no server data -> fall back to local, but push local to server
+                    this.loadFromLocal();
+                    await this.pushLocalToServer();
+                } else {
+                    const payload = doc.data();
+                    if (payload && payload.encryptedUsers) {
+                        const decrypted = await decryptJSON(payload.encryptedUsers, this._cryptoKey);
+                        if (Array.isArray(decrypted)) {
+                            this.enrolledUsers = decrypted;
+                            // also store locally for offline access
+                            localStorage.setItem(this.localKeyName, JSON.stringify(this.enrolledUsers));
+                        } else {
+                            this.enrolledUsers = [];
+                        }
+                    } else {
+                        this.enrolledUsers = [];
+                    }
+                }
+                // get any stored webauthn credential id
+                if (doc.exists && doc.data().webauthn) {
+                    this.credentialId_b64 = doc.data().webauthn.credId || null;
+                }
+            } catch (e) {
+                console.error('loadFromServer error', e);
+                showNotification('Error loading users from server', 'error');
+                this.loadFromLocal();
+            }
+        }
+
+        async pushLocalToServer() {
+            const user = auth.currentUser;
+            if (!user) return;
+            this._cryptoKey = this._cryptoKey || await deriveKeyFromUid(user.uid);
+            const docRef = db.collection('users').doc(user.uid);
+            try {
+                const enc = await encryptJSON(this.enrolledUsers, this._cryptoKey);
+                await docRef.set({ encryptedUsers: enc, updatedAt: Date.now() }, { merge: true });
+                localStorage.setItem(this.localKeyName, JSON.stringify(this.enrolledUsers));
+            } catch (e) {
+                console.error('pushLocalToServer error', e);
+            }
+        }
+
+        loadUsers() {
+            // convenience method for UI code — returns current in-memory list
+            return this.enrolledUsers || [];
+        }
+
+        loadFromLocalIfNeeded() {
+            if (!this.enrolledUsers || !this.enrolledUsers.length) this.loadFromLocal();
+        }
+
+        async enrollUser(userName, pin) {
+            if (!userName || userName.trim() === '') {
+                return { success: false, message: 'User name cannot be empty' };
+            }
+            if (this.enrolledUsers.find(u => u.userName === userName)) {
+                return { success: false, message: 'User already exists' };
+            }
+            if (!/^\d{4}$/.test(pin)) {
+                return { success: false, message: 'PIN must be 4 digits' };
+            }
+            if (this.enrolledUsers.find(u => u.pin === pin)) {
+                return { success: false, message: 'PIN already in use' };
+            }
+
+            const newUser = {
+                id: Date.now().toString(),
+                userName: userName.trim(),
+                pin,
+                enrolledDate: new Date().toLocaleString()
+            };
+
+            this.enrolledUsers.push(newUser);
+            localStorage.setItem(this.localKeyName, JSON.stringify(this.enrolledUsers));
+            // push to server if signed in
+            if (auth.currentUser) {
+                await this.pushLocalToServer();
+            }
+            return { success: true, message: 'User enrolled successfully', user: newUser };
+        }
+
+        async deleteUser(userId) {
+            this.enrolledUsers = this.enrolledUsers.filter(u => u.id !== userId);
+            localStorage.setItem(this.localKeyName, JSON.stringify(this.enrolledUsers));
+            if (auth.currentUser) {
+                await this.pushLocalToServer();
+            }
+            return true;
+        }
+
+        async authenticate() {
+            // Prefer WebAuthn platform authenticator (biometric)
+            if (window.PublicKeyCredential && (await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) {
+                // use WebAuthn get() to verify
+                const credId_b64 = this.credentialId_b64;
+                if (!credId_b64) {
+                    // no registered credential — fall back to register flow or PIN modal
+                    return this._fallbackPinAuthenticate();
+                }
+                try {
+                    const challenge = crypto.getRandomValues(new Uint8Array(32));
+                    const allowList = [{
+                        id: base64ToArrayBuffer(credId_b64),
+                        type: 'public-key',
+                        transports: ['internal']
+                    }];
+
+                    const assertion = await navigator.credentials.get({
+                        publicKey: {
+                            challenge,
+                            allowCredentials: allowList,
+                            userVerification: 'required',
+                            timeout: 60000
+                        }
+                    });
+
+                    // For a real implementation: send assertion to server for verification.
+                    // Here: treat successful get() as success.
+                    return true;
+                } catch (e) {
+                    console.warn('WebAuthn auth failed', e);
+                    // fallback to PIN modal
+                    return this._fallbackPinAuthenticate();
+                }
+            } else {
+                // no WebAuthn available -> PIN modal fallback
+                return this._fallbackPinAuthenticate();
+            }
+        }
+
+        async registerWebAuthn() {
+            // register a new platform authenticator credential
+            if (!window.PublicKeyCredential) return false;
+            try {
+                const user = auth.currentUser;
+                // for 'id' and 'name' we create simple data
+                const publicKey = {
+                    challenge: crypto.getRandomValues(new Uint8Array(32)),
+                    rp: { name: 'Smart Door Lock' },
+                    user: {
+                        id: new TextEncoder().encode(user ? user.uid : 'anonymous'), // needs to be Uint8Array
+                        name: (user && user.email) ? user.email : 'user@example.com',
+                        displayName: (user && user.displayName) ? user.displayName : 'User'
+                    },
+                    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+                    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
+                    timeout: 60000,
+                    attestation: 'none'
+                };
+
+                const credential = await navigator.credentials.create({ publicKey });
+                if (!credential) return false;
+                const rawId = credential.rawId;
+                const credId_b64 = arrayBufferToBase64(rawId);
+
+                // save credential id to Firestore user doc
+                if (auth.currentUser) {
+                    await db.collection('users').doc(auth.currentUser.uid).set({
+                        webauthn: { credId: credId_b64, createdAt: Date.now() }
+                    }, { merge: true });
+                    this.credentialId_b64 = credId_b64;
+                } else {
+                    // save locally if not signed-in
+                    localStorage.setItem('webauthn_cred', credId_b64);
+                    this.credentialId_b64 = credId_b64;
+                }
+                return true;
+            } catch (e) {
+                console.error('registerWebAuthn error', e);
+                return false;
+            }
+        }
+
+        async _fallbackPinAuthenticate() {
+            // original modal-style PIN prompt as fallback: displays fingerprint modal and then prompts PIN
+            return new Promise((resolve) => {
+                const modal = document.getElementById('fingerprintModal');
+                modal.classList.add('show');
+
+                let resolved = false;
+
+                const cancelBtn = document.getElementById('cancelFingerprintBtn');
+                const handleCancel = () => {
+                    if (!resolved) { resolved = true; modal.classList.remove('show'); resolve(false); }
+                };
+                cancelBtn.onclick = handleCancel;
+
+                setTimeout(() => {
+                    if (resolved) return;
+                    modal.classList.remove('show');
+                    const pin = prompt('Enter your 4-digit PIN:');
+                    if (pin) {
+                        const user = this.enrolledUsers.find(u => u.pin === pin);
+                        if (user) { resolved = true; resolve(true); }
+                        else { alert('Invalid PIN'); resolved = true; resolve(false); }
+                    } else { resolved = true; resolve(false); }
+                }, 1200);
+            });
+        }
+    }
+
+    const fingerprintManager = new FingerprintManager();
+
+    /**************************************************************************
+     * Bluetooth + Cloud Bridge
+     *
+     * BluetoothManager tries native Web Bluetooth. If it fails with a
+     * SecurityError / Permissions Policy issue, it falls back to a cloud
+     * bridge using Firestore (devices/DEVICE_ID/commands).
+     *
+     * Cloud bridge requires your microcontroller or a companion app to read
+     * Firestore commands and write status updates back to the document.
+     **************************************************************************/
+    class BluetoothManager {
+        constructor() {
+            this.device = null;
+            this.characteristic = null;
+            this.isConnected = false;
+            this.onConnectionChange = null;
+            this.onMessageReceived = null;
+            this.mode = null; // 'native' or 'cloud'
+            this.cloudDeviceId = 'HC-05-sim'; // identifier for cloud device doc
+        }
+
+        async connect() {
+            // Attempt native Web Bluetooth first
+            try {
+                if (!navigator.bluetooth) throw new Error('Web Bluetooth API is not available in this browser');
+                // Use acceptAllDevices for broader support, but prefer known namePrefixes
+                this.device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
+                });
+
+                const server = await this.device.gatt.connect();
+                const service = await server.getPrimaryService('0000ffe0-0000-1000-8000-00805f9b34fb');
+                this.characteristic = await service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb');
+
+                await this.characteristic.startNotifications();
+                this.characteristic.addEventListener('characteristicvaluechanged', (e) => {
+                    const message = new TextDecoder().decode(e.target.value);
+                    if (this.onMessageReceived) this.onMessageReceived(message);
+                });
+
+                this.isConnected = true;
+                this.mode = 'native';
+                if (this.onConnectionChange) this.onConnectionChange(true);
+                return true;
+            } catch (error) {
+                console.warn('Native Bluetooth connection error:', error);
+                // detect permission policy / security errors and fall back to cloud bridge
+                if (error.name === 'SecurityError' || (error.message && error.message.toLowerCase().includes('permissions policy'))) {
+                    showNotification('Web Bluetooth blocked by browser permissions policy. Falling back to Cloud Bridge.', 'info');
+                    // initialize cloud bridge
+                    await cloudBridge.connectAsClient(this.cloudDeviceId);
+                    this.mode = 'cloud';
+                    this.isConnected = true;
+                    if (this.onConnectionChange) this.onConnectionChange(true);
+                    return true;
+                } else if (error.name === 'NotFoundError') {
+                    showNotification('No Bluetooth device found. Ensure your HC-05 is powered on and discoverable.', 'error');
+                    this.isConnected = false;
+                    if (this.onConnectionChange) this.onConnectionChange(false);
+                    return false;
+                } else {
+                    // other errors - show to user
+                    let errMsg = 'Connection failed. ' + (error.message || error);
+                    showNotification(errMsg, 'error');
+                    this.isConnected = false;
+                    if (this.onConnectionChange) this.onConnectionChange(false);
+                    return false;
+                }
+            }
+        }
+
+        async sendCommand(command) {
+            if (this.mode === 'native') {
+                if (!this.characteristic) { showNotification('Not connected to Bluetooth device', 'error'); return false; }
+                try {
+                    const data = new TextEncoder().encode(command);
+                    await this.characteristic.writeValue(data);
+                    return true;
+                } catch (e) {
+                    console.error('Send error/native:', e);
+                    showNotification('Failed to send command: ' + (e.message || e), 'error');
+                    return false;
+                }
+            } else if (this.mode === 'cloud') {
+                // write command to Firestore for device to pick up
+                try {
+                    await cloudBridge.sendCommandToDevice(this.cloudDeviceId, command);
+                    return true;
+                } catch (e) {
+                    console.error('Send error/cloud:', e);
+                    showNotification('Failed to send command via cloud bridge: ' + (e.message || e), 'error');
+                    return false;
+                }
+            } else {
+                showNotification('Not connected', 'error');
+                return false;
+            }
+        }
+
+        isBluetoothConnected() {
+            return this.isConnected;
+        }
+    }
+
+    /**************************************************************************
+     * CloudBridge: simple Firestore-based command channel
+     * Document structure:
+     *   devices/{deviceId}  -> { connected: true/false, lastHeartbeat: timestamp, lastMsg: "..." }
+     *   devices/{deviceId}/commands -> collection of command docs { cmd, ts, processed: false }
+     *
+     * A companion device (microcontroller+bridge or phone app) should:
+     * - Listen for new commands in devices/{deviceId}/commands
+     * - Execute them (e.g., toggle GPIO to unlock), then write status back to devices/{deviceId}
+     **************************************************************************/
+    const cloudBridge = {
+        unsubscribes: {},
+        async initForUser(uid) {
+            // placeholder for any per-user initialization if needed
+        },
+        async connectAsClient(deviceId) {
+            if (!auth.currentUser) {
+                // still allow cloud usage without sign-in (public), but better with sign-in
+                console.warn('Connecting cloud bridge while not signed in');
+            }
+            // set device doc to connected
+            await db.collection('devices').doc(deviceId).set({ connected: true, lastHeartbeat: Date.now(), lastMsg: '' }, { merge: true });
+            // subscribe to status updates so web app can see device messages (e.g., DOOR_UNLOCKED)
+            if (this.unsubscribes[deviceId]) this.unsubscribes[deviceId]();
+            this.unsubscribes[deviceId] = db.collection('devices').doc(deviceId)
+                .onSnapshot(doc => {
+                    const d = doc.data();
+                    if (!d) return;
+                    if (d.lastMsg && d.lastMsg.includes('DOOR_UNLOCKED')) {
+                        if (bluetooth.onMessageReceived) bluetooth.onMessageReceived('DOOR_UNLOCKED');
+                    } else if (d.lastMsg && d.lastMsg.includes('DOOR_LOCKED')) {
+                        if (bluetooth.onMessageReceived) bluetooth.onMessageReceived('DOOR_LOCKED');
+                    }
+                });
+        },
+        async sendCommandToDevice(deviceId, command) {
+            // add a command doc the device should process
+            const cmdRef = db.collection('devices').doc(deviceId).collection('commands').doc();
+            await cmdRef.set({ cmd: command, ts: Date.now(), processed: false });
+            // Optionally, notify: write last command to device doc
+            await db.collection('devices').doc(deviceId).set({ lastCommand: command, lastCommandTs: Date.now() }, { merge: true });
+        }
+    };
+
+    const bluetooth = new BluetoothManager();
+
+    /**************************************************************************
+     * UI bindings and flows (mostly preserved)
+     **************************************************************************/
+    document.querySelectorAll('.nav-link').forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const page = link.getAttribute('data-page');
+
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.getElementById(page).classList.add('active');
+
+            document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+            link.classList.add('active');
+
+            if (page === 'logs') loadLogs();
+            if (page === 'enroll') updateUsersList();
+        });
+    });
+
+    document.getElementById('connectionStatus').addEventListener('click', async () => {
+        if (!bluetooth.isBluetoothConnected()) {
+            showNotification('Connecting...', 'info');
+            await bluetooth.connect();
+        } else {
+            showNotification('Already connected', 'info');
+        }
+    });
+
+    bluetooth.onConnectionChange = (connected) => {
+        const dot = document.querySelector('.status-dot');
+        const text = document.getElementById('connectionText');
+        if (connected) {
+            dot.classList.add('connected');
+            dot.classList.remove('disconnected');
+            text.textContent = bluetooth.mode === 'native' ? 'Connected to Bluetooth (native)' : 'Connected via Cloud Bridge';
+        } else {
+            dot.classList.remove('connected');
+            dot.classList.add('disconnected');
+            text.textContent = 'Click here to connect';
+        }
+    };
+
+    bluetooth.onMessageReceived = (message) => {
+        if (message.includes('DOOR_UNLOCKED')) {
+            updateLockStatus('UNLOCKED');
+        } else if (message.includes('DOOR_LOCKED')) {
+            updateLockStatus('LOCKED');
+        }
+    };
+
+    document.getElementById('unlockBtn').addEventListener('click', async () => {
+        if (!bluetooth.isBluetoothConnected()) {
+            showNotification('Please connect first', 'error');
+            return;
+        }
+
+        if (fingerprintManager.loadUsers().length === 0) {
+            showNotification('No users enrolled. Please add a user first.', 'error');
+            return;
+        }
+
+        showNotification('Authenticating...', 'info');
+        const authOK = await fingerprintManager.authenticate();
+        if (authOK) {
+            showNotification('Authentication successful. Unlocking...', 'success');
+            const sent = await bluetooth.sendCommand('UNLOCK');
+            if (sent) {
+                logAccess('UNLOCK', bluetooth.mode === 'native' ? 'FINGERPRINT' : 'CLOUD-FINGERPRINT', 'SUCCESS');
+                setTimeout(() => updateLockStatus('UNLOCKED'), 500);
+            }
+        } else {
+            showNotification('Authentication failed', 'error');
+            logAccess('UNLOCK', 'FINGERPRINT', 'FAILED');
+        }
+    });
+
+    function updateLockStatus(status) {
+        const icon = document.getElementById('lockIcon');
+        const text = document.getElementById('lockStatus');
+
+        if (status === 'UNLOCKED') {
+            icon.innerHTML = '<span>🔓</span>';
+            icon.classList.remove('locked');
+            icon.classList.add('unlocked');
+            text.textContent = 'UNLOCKED';
+            showNotification('Door unlocked! Auto-locking in 3 seconds...', 'success');
+
+            setTimeout(() => {
+                icon.innerHTML = '<span>🔒</span>';
+                icon.classList.remove('unlocked');
+                icon.classList.add('locked');
+                text.textContent = 'LOCKED';
+            }, 3000);
+        } else if (status === 'LOCKED') {
+            icon.innerHTML = '<span>🔒</span>';
+            icon.classList.remove('unlocked');
+            icon.classList.add('locked');
+            text.textContent = 'LOCKED';
+        }
+    }
+
+    /**************************************************************************
+     * Enroll UI
+     **************************************************************************/
+    document.getElementById('enrollBtn').addEventListener('click', async () => {
+        const userName = document.getElementById('userName').value.trim();
+        const userPin = document.getElementById('userPin').value.trim();
+        const status = document.getElementById('enrollStatus');
+
+        if (!userName) {
+            status.textContent = 'Please enter a user name';
+            status.className = 'status-message error';
+            return;
+        }
+
+        if (!userPin) {
+            status.textContent = 'Please enter a 4-digit PIN';
+            status.className = 'status-message error';
+            return;
+        }
+
+        const result = await fingerprintManager.enrollUser(userName, userPin);
+
+        if (result.success) {
+            status.textContent = `✓ ${userName} enrolled successfully`;
+            status.className = 'status-message success';
+            document.getElementById('userName').value = '';
+            document.getElementById('userPin').value = '';
+            updateUsersList();
+            showNotification('User enrolled successfully!', 'success');
+        } else {
+            status.textContent = result.message;
+            status.className = 'status-message error';
+        }
+    });
+
+    function updateUsersList() {
+        const list = document.getElementById('usersList');
+        const users = fingerprintManager.loadUsers();
+
+        if (!users || users.length === 0) {
+            list.innerHTML = '<p class="empty-message">No users registered yet</p>';
+            return;
+        }
+
+        list.innerHTML = '';
+
+        users.forEach(user => {
+            const userItem = document.createElement('div');
+            userItem.className = 'user-item';
+
+            const userInfo = document.createElement('div');
+            userInfo.className = 'user-info';
+
+            const userName = document.createElement('div');
+            userName.className = 'user-name';
+            userName.textContent = user.userName;
+
+            const userDate = document.createElement('div');
+            userDate.className = 'user-date';
+            userDate.textContent = `Enrolled: ${user.enrolledDate} | PIN: ****`;
+
+            userInfo.appendChild(userName);
+            userInfo.appendChild(userDate);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'btn btn-delete';
+            deleteBtn.innerHTML = '🗑️ Delete';
+            deleteBtn.addEventListener('click', async () => {
+                if (confirm(`Delete user "${user.userName}"?`)) {
+                    await fingerprintManager.deleteUser(user.id);
+                    updateUsersList();
+                    showNotification('User deleted successfully', 'success');
+                }
+            });
+
+            userItem.appendChild(userInfo);
+            userItem.appendChild(deleteBtn);
+            list.appendChild(userItem);
+        });
+    }
+
+    /**************************************************************************
+     * Logs stored in Firestore (per user) + local fallback
+     **************************************************************************/
+    function logAccess(action, method, status) {
+        try {
+            const user = auth.currentUser;
+            const entry = {
+                timestamp: new Date().toLocaleString(),
+                action, method, status
+            };
+
+            // store locally for immediate UI
+            const logs = JSON.parse(localStorage.getItem('accessLogs') || '[]');
+            logs.unshift(entry);
+            if (logs.length > 100) logs.pop();
+            localStorage.setItem('accessLogs', JSON.stringify(logs));
+
+            // push to Firestore if signed in
+            if (user) {
+                const userLogsRef = db.collection('users').doc(user.uid).collection('logs').doc();
+                userLogsRef.set({ ...entry, createdAt: Date.now() });
+            }
+        } catch (e) {
+            console.error('Error logging access:', e);
+        }
+    }
+
+    async function loadLogs() {
+        const list = document.getElementById('logsList');
+        try {
+            // if signed in, try server logs first
+            const user = auth.currentUser;
+            let logs = [];
+            if (user) {
+                // fetch last 100 logs from Firestore
+                const snapshot = await db.collection('users').doc(user.uid).collection('logs').orderBy('createdAt', 'desc').limit(100).get();
+                logs = snapshot.docs.map(d => {
+                    const data = d.data();
+                    return { timestamp: data.timestamp || new Date(data.createdAt).toLocaleString(), action: data.action, method: data.method, status: data.status };
+                });
+            }
+
+            // if no logs from server, use local
+            if (!logs || logs.length === 0) {
+                logs = JSON.parse(localStorage.getItem('accessLogs') || '[]');
+            }
+
+            if (!logs || logs.length === 0) {
+                list.innerHTML = '<p class="empty-message">No access logs yet</p>';
+                return;
+            }
+
+            list.innerHTML = logs.map(log => `
+                <div class="log-item">
+                    <div class="log-timestamp">${log.timestamp}</div>
+                    <div class="log-action ${log.action.toLowerCase()}">${log.action}</div>
+                    <div class="log-method">${log.method}</div>
+                    <div class="log-status ${log.status.toLowerCase()}">${log.status}</div>
+                </div>
+            `).join('');
+        } catch (e) {
+            console.error('Error loading logs:', e);
+            list.innerHTML = '<p class="empty-message">Error loading logs</p>';
+        }
+    }
+
+    document.getElementById('clearLogsBtn').addEventListener('click', async () => {
+        if (confirm('Clear all logs?')) {
+            localStorage.removeItem('accessLogs');
+            const user = auth.currentUser;
+            if (user) {
+                // delete server logs (careful: in production, batch delete using server function)
+                const snapshot = await db.collection('users').doc(user.uid).collection('logs').get();
+                const batch = db.batch();
+                snapshot.docs.forEach(doc => batch.delete(doc.ref));
+                await batch.commit();
+            }
+            loadLogs();
+            showNotification('Logs cleared', 'info');
+        }
+    });
+
+    // initialize local lists on load
+    fingerprintManager.loadFromLocal();
+    updateUsersList();
+    loadLogs();
+
+    /**************************************************************************
+     * Optional helper: register webauthn after user creates first user
+     * Call fingerprintManager.registerWebAuthn() from UI if you'd like to prompt
+     * the user to register biometric credential for later use.
+     **************************************************************************/
+    // Example: auto-attempt registering WebAuthn if available and user signed in
+    // (commented out — call manually if desired)
+    // if (auth.currentUser && window.PublicKeyCredential) fingerprintManager.registerWebAuthn();
+
